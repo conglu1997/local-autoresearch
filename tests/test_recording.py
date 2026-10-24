@@ -50,35 +50,62 @@ def test_local_stream_records_reasoning_content_and_usage_without_credentials(
 @pytest.mark.parametrize(
     "base_url",
     [
-        "https://api.example.com/v1",
+        "http://api.example.com/v1",
         "http://127.0.0.1.example.com/v1",
+        "http://[2001:db8::1]/v1",
         "http://user:secret@localhost:8080/v1",
         "http://localhost:8080/v1?api_key=secret",
         "http://localhost:8080/v1#fragment",
+        "https://user:secret@api.example.com/v1",
+        "https://api.example.com/v1?api_key=secret",
+        "https://api.example.com/v1#fragment",
+        "https:///v1",
+        "https://",
+        "ftp://api.example.com/v1",
+        "//api.example.com/v1",
     ],
 )
-def test_connection_rejects_remote_hosts_and_embedded_credentials(base_url):
-    with pytest.raises(ValueError, match="local base URL"):
-        research.local_server(base_url, "test-model", None)
+def test_connection_rejects_insecure_or_incomplete_urls_and_embedded_credentials(base_url):
+    with pytest.raises(ValueError, match="HTTPS base URL"):
+        research.model_server(base_url, "test-model", None)
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "[::1]"])
-def test_connection_accepts_loopback_without_rec(host):
-    url = f"http://{host}:8080/v1"
-    config = research.local_server(url + "/", "test-model", None)
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_connection_accepts_loopback_without_rec(host, scheme):
+    url = f"{scheme}://{host}:8080/v1"
+    config = research.model_server(url + "/", "test-model", None)
     assert config["endpoint"] == url
     assert research.api_key(config) is None
 
 
 def test_connection_flags_must_be_paired():
     with pytest.raises(ValueError, match="requires --model"):
-        research.local_server("http://localhost:8080/v1", None, None)
+        research.model_server("http://localhost:8080/v1", None, None)
     with pytest.raises(ValueError, match="require --base-url"):
-        research.local_server(None, "test-model", None)
+        research.model_server(None, "test-model", None)
 
 
+@pytest.mark.parametrize(
+    "base_url", ["https://api.example.com/v1", "https://models.example.net:8443/api/v1"]
+)
+@pytest.mark.parametrize("key_env", [None, "CUSTOM_MODEL_TEST_KEY"])
+def test_https_connection_uses_only_the_explicit_credential_variable(
+    base_url, key_env, monkeypatch
+):
+    monkeypatch.setenv("CUSTOM_MODEL_TEST_KEY", "test-credential")
+    config = research.model_server(base_url + "/", "test-model", key_env)
+    assert config == {
+        "endpoint": base_url,
+        "model": "test-model",
+        "api_key_env": key_env,
+    }
+    assert research.api_key(config) == ("test-credential" if key_env else None)
+
+
+@pytest.mark.parametrize("endpoint", ["http://127.0.0.1:8080/v1", "https://api.example.com/v1"])
 @pytest.mark.parametrize("key_env", [None, "LOCAL_MODEL_TEST_KEY"])
-def test_custom_model_run_resume_export_and_report(tmp_path, monkeypatch, key_env):
+def test_custom_model_run_resume_export_and_report(tmp_path, monkeypatch, key_env, endpoint):
     token = "private-test-credential"
     if key_env:
         monkeypatch.setenv(key_env, token)
@@ -97,7 +124,7 @@ def test_custom_model_run_resume_export_and_report(tmp_path, monkeypatch, key_en
 
     def respond(request, **kwargs):
         requested.append(json.loads(request.data))
-        assert request.full_url == "http://127.0.0.1:8080/v1/chat/completions"
+        assert request.full_url == endpoint + "/chat/completions"
         assert request.get_header("Authorization") == (f"Bearer {token}" if key_env else None)
         return Response()
 
@@ -108,7 +135,7 @@ def test_custom_model_run_resume_export_and_report(tmp_path, monkeypatch, key_en
         resume=False,
         experiments=1,
         max_tokens=1024,
-        base_url="http://127.0.0.1:8080/v1",
+        base_url=endpoint,
         model="test-model",
         api_key_env=key_env,
     )
@@ -125,7 +152,7 @@ def test_custom_model_run_resume_export_and_report(tmp_path, monkeypatch, key_en
         decision = json.loads((args.run / name / "decision.json").read_text())
         assert decision == {"decision": "discard", "parent": "000"}
     args.model = "changed-model"
-    with pytest.raises(RuntimeError, match="Local model configuration changed"):
+    with pytest.raises(RuntimeError, match="Model configuration changed"):
         research.run(args)
     target = tmp_path / "export"
     export(args.run, target)

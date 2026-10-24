@@ -125,7 +125,7 @@ def test_runner_records_single_trial_and_rejects_changed_evaluator(tmp_path, mon
     assert json.loads((args.run / "001/decision.json").read_text())["decision"] == "discard"
     args.resume = True
     status["version"] = "changed"
-    with pytest.raises(RuntimeError, match="Local model configuration changed"):
+    with pytest.raises(RuntimeError, match="Model configuration changed"):
         research.run(args)
     status["version"] = "test"
     manifest["fixed_files"][f"tasks/{task}/__init__.py"] = "changed"

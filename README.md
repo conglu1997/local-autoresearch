@@ -128,6 +128,8 @@ These demos use Recursive's Flint to bring automated experimentation onto a MacB
 
 Flint is the default. If you already use another local model in OpenCode, you can connect to its OpenAI-compatible chat server by adding `--base-url http://127.0.0.1:8080/v1 --model your-model` to the research command. Substitute your server's base URL and model ID. [Connection details](docs/running.md#another-local-model).
 
+For a remote model, configure an [HTTPS chat API](docs/running.md#remote-model-server) with the same connection flags. Candidate evaluation still runs locally; prompts and code are sent to the selected server.
+
 ## License
 
 Code, documentation and original visualizations are [MIT licensed](LICENSE). The UCI Bike Sharing data retains its [CC BY 4.0 license and attribution](tasks/bike/README.md#data). This license does not cover the separately distributed Flint model or runtime.
