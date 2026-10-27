@@ -1,0 +1,114 @@
+diff --git a/common/jinja/lexer.cpp b/common/jinja/lexer.cpp
+index 598982c2fe4a..bf2dfacdadd2 100644
+--- a/common/jinja/lexer.cpp
++++ b/common/jinja/lexer.cpp
+@@ -1,7 +1,9 @@
+ #include "lexer.h"
+ #include "runtime.h"
++#include "unicode.h"
+ 
+ #include <cctype>
++#include <charconv>
+ #include <functional>
+ #include <map>
+ #include <string>
+@@ -75,6 +77,24 @@ lexer_result lexer::tokenize(const std::string & source) {
+                 }
+                 // add escaped char
+                 char escaped_char = src[pos++];
++                if (escaped_char == 'x') {
++                    if (pos + 1 >= src.size()) {
++                        throw lexer_exception("incomplete hexadecimal escape", source, pos);
++                    }
++
++                    unsigned int value = 0;
++                    const char * first = &src[pos];
++                    const char * last  = first + 2;
++
++                    auto [ptr, ec] = std::from_chars(first, last, value, 16);
++                    if (ec != std::errc{} || ptr != last) {
++                        throw lexer_exception("invalid hexadecimal escape", source, pos);
++                    }
++
++                    str += common_unicode_cpt_to_utf8(value);
++                    pos += 2;
++                    continue;
++                }
+                 if (escape_chars.find(escaped_char) == escape_chars.end()) {
+                     throw lexer_exception(std::string("unknown escape character \\") + escaped_char, source, pos);
+                 }
+diff --git a/tests/test-jinja.cpp b/tests/test-jinja.cpp
+index ddeaa1fe9a79..327ab365c44e 100644
+--- a/tests/test-jinja.cpp
++++ b/tests/test-jinja.cpp
+@@ -25,6 +25,7 @@ static void test_expressions(testing & t);
+ static void test_set_statement(testing & t);
+ static void test_filters(testing & t);
+ static void test_literals(testing & t);
++static void test_hexadecimal_escapes(testing & t);
+ static void test_comments(testing & t);
+ static void test_macros(testing & t);
+ static void test_namespace(testing & t);
+@@ -65,6 +66,7 @@ int main(int argc, char *argv[]) {
+     t.test("set statement", test_set_statement);
+     t.test("filters", test_filters);
+     t.test("literals", test_literals);
++    t.test("hexadecimal escapes", test_hexadecimal_escapes);
+     t.test("comments", test_comments);
+     t.test("macros", test_macros);
+     t.test("namespace", test_namespace);
+@@ -1171,6 +1173,54 @@ static void test_literals(testing & t) {
+     );
+ }
+ 
++static void test_hexadecimal_escapes(testing & t) {
++    test_template(t, "remove NUL from message content",
++        R"({{ message.content | replace("\x00", "") }})",
++        {{"message", {{"content", std::string("\0a\0b\0", 5)}}}},
++        "ab"
++    );
++
++    test_template(t, "non-ASCII hex escape produces UTF-8",
++        R"({{ '\xE9' }})",
++        json::object(),
++        "\xc3\xa9"
++    );
++
++    test_template(t, "consume exactly two hex digits",
++        R"({{ '\x414' }})",
++        json::object(),
++        "A4"
++    );
++
++    test_template(t, "escaped backslashes remain literal",
++        R"({{ '\\xE9' }})",
++        json::object(),
++        R"(\xE9)"
++    );
++
++    if (!g_python_mode) {
++        const char * invalid_templates[] = {
++            R"({{ '\x' }})",
++            R"({{ '\x0' }})",
++            R"({{ '\xG1' }})",
++            R"({{ '\x1G' }})",
++            R"({{ '\x)",
++            R"({{ '\x0)",
++        };
++        for (const auto * tmpl : invalid_templates) {
++            t.test("reject " + json(tmpl).dump(), [&](testing & t) {
++                bool rejected = false;
++                try {
++                    jinja::lexer().tokenize(tmpl);
++                } catch (const jinja::lexer_exception &) {
++                    rejected = true;
++                }
++                t.assert_true("malformed hex escape must raise a lexer error", rejected);
++            });
++        }
++    }
++}
++
+ static void test_comments(testing & t) {
+     test_template(t, "inline comment",
+         "before{# comment #}after",

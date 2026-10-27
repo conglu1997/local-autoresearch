@@ -1,6 +1,6 @@
 [project]
 name = "local-autoresearch"
-version = "0.1.0"
+version = "0.2.0"
 description = "A local research loop for CPU experiments, with Flint by default"
 license = "MIT"
 requires-python = ">=3.12,<3.13"

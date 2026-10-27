@@ -1,6 +1,5 @@
 """Run an isolated solver and independently score its returned solution."""
 
-import argparse
 import hashlib
 import json
 import math
@@ -104,6 +103,10 @@ def run_seed(source, seed, task="circle", *, final=False):
                 timeout = True
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
             stdout.seek(0)
             stderr.seek(0)
             output.seek(0)
@@ -139,6 +142,10 @@ def run_seed(source, seed, task="circle", *, final=False):
 
 def evaluate(source, seeds=SEEDS, task="circle", *, final=False):
     trials = [run_seed(source, seed, task, final=final) for seed in seeds]
+    for trial in trials:
+        if trial["cpu_seconds"] > CPU_SECONDS or trial["wall_seconds"] > WALL_SECONDS:
+            trial["valid"] = False
+            trial["error"] = "Measured execution time exceeded the frozen limit"
     valid = all(trial["valid"] for trial in trials)
     return {
         "source_sha256": digest(source),
@@ -146,16 +153,3 @@ def evaluate(source, seeds=SEEDS, task="circle", *, final=False):
         "mean_score": math.fsum(t["score"] for t in trials) / len(trials) if valid else None,
         "trials": trials,
     }
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("source", type=Path, nargs="?", default=ROOT / "tasks/circle/baseline.py")
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--seeds", type=int, nargs="+", default=SEEDS)
-    parser.add_argument("--task", choices=list(TASKS), default="circle")
-    args = parser.parse_args()
-    result = evaluate(args.source.read_text(), args.seeds, args.task)
-    args.output.write_text(json.dumps(result, indent=2) + "\n")
-    print(json.dumps({key: value for key, value in result.items() if key != "trials"}))
-    sys.exit(0 if result["valid"] else 1)

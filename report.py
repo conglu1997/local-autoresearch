@@ -21,6 +21,10 @@ def load(path):
 
 def report(root):
     manifest = load(root / "manifest.json")
+    if "parallel" in manifest:
+        from tools.team_report import parallel_report
+
+        return parallel_report(root, manifest)
     model = "Flint" if manifest["model"] == "flint" else manifest["model"]
     task = manifest["task"] if "task" in manifest else "circle"
     score_label = "Σr" if len(manifest["seeds"]) == 1 else "mean Σr"
@@ -164,7 +168,7 @@ def report(root):
             s=16,
             alpha=0.65,
             zorder=3,
-            label="Scored attempt (duplicates included)",
+            label="Scored attempt",
         )
         axis.set(xlabel="Attempt (0 = baseline)", ylabel=score_label)
         axis.grid(alpha=0.15)
@@ -214,7 +218,7 @@ def report(root):
     fig.text(
         0.04,
         0.02,
-        "Saved coordinates, unchanged. Numerical tolerance and exact feasibility are reported separately.",
+        "Saved coordinates.",
         fontsize=9,
         color="#555555",
     )
@@ -243,7 +247,7 @@ body{{margin:0;background:#faf9f6;color:#24212a;font:16px/1.6 system-ui,sans-ser
 <img src="packings.svg" alt="Baseline and best packing, shown side by side"><img src="progress.svg" alt="All measured experiment scores and the retained best score">
 <details><summary>Best candidate across all search seeds</summary><img src="best-seeds.svg" alt="The retained candidate's unchanged packing for each search seed"></details>
 <p class="note">Red crosses mark invalid attempts at the baseline level, not a measured score. Best candidate exact decimal feasibility: {exact}/{len(best_result["trials"])} search seeds. Generated tokens: {tokens if usage_complete else "unknown (API usage incomplete)"}.</p>
-<p class="note">Highest mean score with exact decimal feasibility on every search seed: {exact_link}, Σr = {exact_score:.12f}. Keep/discard decisions use the fixed numerical-score rule.</p>
+<p class="note">Highest mean score with exact decimal feasibility on every search seed: {exact_link}, Σr = {exact_score:.12f}.</p>
 <details><summary>Experiment ledger</summary><table><tr><th>Attempt</th><th>{score_label}</th><th>Decision</th></tr>{"".join(rows)}</table></details>{validation}
 {"".join(cards)}<footer>{html.escape(model)} proposed the solver changes; the evaluator and baseline stayed fixed. <a href="manifest.json">Run manifest</a>.</footer></main></html>"""
     (root / "report.html").write_text(document)
@@ -294,7 +298,7 @@ def task_report(root, task, model, completed, best, scores, best_scores, cards):
             f"{final['trials'][0][view.METRIC]:.6g}" if final["valid"] else "failed evaluation"
         )
         final_note = f'<p><a href="final-test.json">Held-out final test</a>: {measured_final}.</p>'
-        if task == "bike" and "comparison" in load(root / "manifest.json")["final_test"]:
+        if task == "bike":
             baseline_final = load(root / "baseline-final-test.json")
             baseline_value = (
                 f"{baseline_final['trials'][0][view.METRIC]:.6g}"

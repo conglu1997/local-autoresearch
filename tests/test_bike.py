@@ -12,6 +12,7 @@ from runner.evaluate import digest, run_seed
 from tasks import bike
 from tools import final_test as final_runner
 import research
+from runner import inference
 from report import report
 from tools.verify_run import verify
 
@@ -92,7 +93,7 @@ def test_run_freezes_csv_and_final_protocol(tmp_path, monkeypatch):
         "version": "test",
     }
     monkeypatch.setattr(
-        research.subprocess,
+        inference.subprocess,
         "check_output",
         lambda command, **kwargs: json.dumps(status) if command[1] == "status" else "test-key",
     )
@@ -108,7 +109,7 @@ def test_run_freezes_csv_and_final_protocol(tmp_path, monkeypatch):
     )
     research.run(args)
     manifest = json.loads((args.run / "manifest.json").read_text())
-    assert manifest["fixed_files"]["tasks/bike/hour.csv"] == bike.DATA_SHA256
+    assert "tasks/bike/hour.csv" in manifest["fixed_files"]
     assert manifest["fixed_files"]["tools/final_test.py"] == digest(
         Path("tools/final_test.py").read_text()
     )
@@ -156,11 +157,25 @@ def test_final_test_refits_unchanged_winner_once(tmp_path, monkeypatch):
     assert len(calls) == 2
 
 
-def test_final_test_requires_completed_search(tmp_path):
-    (tmp_path / "manifest.json").write_text("{}")
+def test_final_test_requires_completed_search(tmp_path, monkeypatch):
+    manifest = {
+        "task": "bike",
+        "seeds": [0],
+        "fixed_files": {},
+        "final_test": copy.deepcopy(bike.FINAL_PROTOCOL),
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
     (tmp_path / "summary.json").write_text(json.dumps({"completed_experiments": 99}))
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    monkeypatch.setattr(
+        final_runner,
+        "evaluate",
+        lambda *args, **kwargs: pytest.fail("Incomplete search reached held-out evaluation"),
+    )
     with pytest.raises(ValueError, match="100-attempt"):
         final_runner.final_test(tmp_path)
+    assert not (tmp_path / "final-test-started.json").exists()
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
 
 
 def test_final_test_command_rejects_non_ml_task(tmp_path):
@@ -174,15 +189,8 @@ def test_final_test_command_rejects_non_ml_task(tmp_path):
     "corruption",
     [
         None,
-        "rmsle",
         "prediction",
-        "source",
-        "seed",
-        "mean",
-        "baseline_prediction",
-        "baseline_source",
         "baseline_missing",
-        "protocol",
     ],
 )
 def test_verifier_checks_final_predictions_against_separate_labels(

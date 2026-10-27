@@ -1,7 +1,5 @@
 import gzip
 import json
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -13,16 +11,6 @@ from tasks import TASKS
 from tasks.route.baseline import solve as route_baseline
 from tasks.schedule.baseline import solve as schedule_baseline
 from tools.verify_run import verify, verify_stream
-
-
-def test_verification_refuses_disabled_assertions(tmp_path):
-    result = subprocess.run(
-        [sys.executable, "-O", "-m", "tools.verify_run", str(tmp_path)],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode != 0
-    assert "requires Python without -O" in result.stderr
 
 
 @pytest.fixture

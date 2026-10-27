@@ -2,7 +2,8 @@ import json
 
 import pytest
 
-from tools.verify_run import inventory, structural_hash
+from runner.search import structural_hash
+from tools.verify_run import inventory
 from runner.evaluate import digest
 
 

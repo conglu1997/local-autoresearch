@@ -6,7 +6,7 @@ Let [Flint](https://recursive.com/updates/introducing-recursive-flint), a local 
   <img src="docs/images/overview.gif" width="880" alt="Flint autoresearch on my MacBook: progress in geometry, scheduling and machine learning">
 </p>
 
-[Try it](#try-it) · [Explore the experiments](#circle-packing) · [Add your own task](docs/add-a-task.md)
+[Try it](#try-it) · [Explore the experiments](#circle-packing) · [Run eight workers](#eight-workers) · [Add your own task](docs/add-a-task.md)
 
 ## Try it
 
@@ -69,7 +69,19 @@ Across 100 attempts, validation error (RMSLE) fell from **0.535904 to 0.370806**
 
 [Complete run and predictions](examples/2026-10-21-bike/README.md) · [Task, data attribution and run command](tasks/bike)
 
-These runs used a preview runtime and simple baselines on fixed problems. Each example includes every attempt, including failures, along with checked scores and limitations.
+Each example includes every attempt, including failures.
+
+## Eight workers
+
+<p align="center">
+  <a href="docs/eight-workers.md"><img src="docs/images/eight-workers/replay.gif" width="760" alt="Eight Flint workers shortening a factory schedule on an M4 Pro"></a>
+</p>
+
+Run eight workers around one local Flint model with llama.cpp. Each worker starts from the best program so far, tries one of four directions (refine, change approach, simplify or question an assumption) and shares any improvement as soon as it is tested.
+
+In six-hour runs on a 48 GB M4 Pro, eight workers completed 2.0–2.5× as many valid experiments as a single worker running the same loop and finished with a better score in 5 of 6 pairs.
+
+[Set up eight workers](docs/eight-workers.md) · [Results](docs/eight-worker-results.md)
 
 ## Add a task
 
@@ -83,7 +95,7 @@ The two top-level scripts are the main entry points:
 research.py   Run a search with Flint
 report.py     Turn a saved run into an HTML report
 tasks/        Problem inputs, baselines, scoring and prompts
-runner/       Run candidates in the macOS sandbox
+runner/       Model client, eight-worker scheduling and sandboxed evaluation
 tools/        Export, verify and rebuild figures
 examples/     The three completed experiments
 docs/         Setup and task-writing guides
@@ -106,19 +118,9 @@ To rebuild the README gallery from saved measurements, install `ffmpeg` and run:
 uv run python -m tools.render_gallery
 ```
 
-This only rebuilds images; it does not run research. The overview pairs each task's recorded output with a plain progress curve over actual model-response hours. The bike panel compares actual and predicted daily rentals across the validation period; its progress metric remains hourly validation RMSLE. The overview and detailed bike charts show the first three model hours. The saved report retains all 100 attempts. Change the shared plotting window with `--bike-hours` (for example, `--bike-hours 6` displays the full saved run). Discovery labels appear on the separate detailed charts. [Images for sharing](docs/images/social).
+This reads the saved runs and doesn't call the model. The bike charts show the first three model hours; add `--bike-hours 6` to show the whole run, or see [rendering a new bike run](docs/running.md#render-a-new-bike-run) to use your own. [Images for sharing](docs/images/social).
 
-To preview a bike run while it is still running, use a separate output directory:
-
-```sh
-uv run python -m tools.render_gallery --bike-run runs/bike-demo --output-dir runs/bike-demo/media --in-progress --still-only
-```
-
-Only completed attempts appear. Remove `--still-only` to render the overview GIF. For a completed 100-attempt run, omit `--in-progress`.
-
-Discovery labels for the detailed bike chart come from a JSON file passed to `--bike-discoveries`. See the [complete rendering command](docs/running.md#render-a-new-bike-run) and [saved bike annotations](examples/2026-10-21-bike/discoveries.json). Each entry has `attempt`, `source_sha256`, `label` and `position` fields. Positions are fractions of the plot area. The renderer checks that every label points to a retained improvement with the recorded program hash. Write labels from the actual code changes; these describe observed changes, not isolated causal effects.
-
-`report.py` rebuilds each run's HTML report and diagnostic plots. The example READMEs include the commands for the [circle animation](examples/2026-10-20-final#animation) and [detailed scheduling figure](examples/2026-10-20-jobshop#timelines-and-progress).
+`report.py` rebuilds each run's HTML report and plots. The example READMEs include the commands for the [circle animation](examples/2026-10-20-final#animation) and [detailed scheduling figure](examples/2026-10-20-jobshop#timelines-and-progress).
 
 ## Acknowledgments
 

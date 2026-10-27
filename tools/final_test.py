@@ -7,22 +7,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from runner.evaluate import ROOT, digest, evaluate
-from research import save
+from runner.core import save
 from tasks import TASKS
+from tools.final_protocol import budget, check_completion
 
 
 def final_test(root):
     manifest = json.loads((root / "manifest.json").read_text())
     summary = json.loads((root / "summary.json").read_text())
-    if summary["completed_experiments"] != 100:
-        raise ValueError("Finish the 100-attempt search before the final test")
     task = manifest["task"]
     if not hasattr(TASKS[task], "FINAL_PROTOCOL"):
         raise ValueError(f"Task {task} has no held-out test split")
+    check_completion(root, manifest, summary["completed_experiments"])
     for name, expected in manifest["fixed_files"].items():
         if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != expected:
             raise ValueError(f"Frozen file changed: {name}")
-    if manifest["final_test"] != TASKS[manifest["task"]].FINAL_PROTOCOL:
+    if manifest["final_test"] != TASKS[task].final_protocol(budget(manifest)):
         raise ValueError("Final-test procedure differs from the frozen protocol")
     best = root / summary["best_attempt"]
     source = (best / "solver.py").read_text()

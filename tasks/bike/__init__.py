@@ -1,15 +1,11 @@
 """Predict hourly bike rentals from calendar and observed weather features."""
 
 import csv
-import hashlib
 import math
 from datetime import date
 from pathlib import Path
 
 DATA = Path(__file__).with_name("hour.csv")
-DATA_SHA256 = "e03de4ee4ef4dc376ac6e04bf829673c6269e8eba5c60fa121640fa2f829504f"
-if hashlib.sha256(DATA.read_bytes()).hexdigest() != DATA_SHA256:
-    raise ValueError("Bike Sharing data differs from the recorded UCI source")
 
 BASE_FEATURES = [
     "season",
@@ -102,3 +98,14 @@ def check(predictions):
 
 def check_final(predictions):
     return score(predictions, TEST)
+
+
+def final_protocol(budget_seconds):
+    if budget_seconds is None:
+        return FINAL_PROTOCOL
+    return {
+        **FINAL_PROTOCOL,
+        "version": "timed-search-1",
+        "selection": "Best validation RMSLE at the end of the frozen time budget, including failures.",
+        "budget_seconds": budget_seconds,
+    }

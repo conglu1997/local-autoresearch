@@ -7,17 +7,23 @@ import pytest
 
 from tools import export_run
 
+MANIFEST = json.dumps({"inference": {"api_key_env": "TEST_KEY"}})
 
-def test_export_redacts_paths_and_preserves_stream(tmp_path, monkeypatch):
-    monkeypatch.setattr(export_run, "api_key", lambda inference: "k" * 32)
+
+@pytest.mark.parametrize("sse", [False, True])
+def test_export_redacts_paths_and_preserves_stream(tmp_path, monkeypatch, sse):
+    monkeypatch.setenv("TEST_KEY", "k" * 32)
     monkeypatch.setattr(export_run, "report", lambda root: (root / "report.html").write_text(""))
     source, target = tmp_path / "source", tmp_path / "target"
     attempt = source / "001"
     attempt.mkdir(parents=True)
-    (source / "manifest.json").write_text("{}")
     paired_baseline = '{"valid": false, "trials": []}\n'
     (source / "baseline-final-test.json").write_text(paired_baseline)
-    raw = json.dumps({"text": f"File {Path.home()}/code/example.py failed"}) + "\n"
+    message = f"File {Path.home()}/code/example.py failed"
+    if sse:
+        message = "data: " + json.dumps({"choices": [{"index": 0, "delta": {"content": message}}]})
+    raw = json.dumps({"seconds": 0, "line": message}) + "\n"
+    (source / "manifest.json").write_text(MANIFEST)
     (attempt / "stream.jsonl").write_text(raw)
     (attempt / "diagnostic.json").write_text(raw)
     (attempt / "http-error.txt").write_text(raw)
@@ -38,9 +44,69 @@ def test_export_redacts_paths_and_preserves_stream(tmp_path, monkeypatch):
 
 def test_export_refuses_local_token(tmp_path, monkeypatch):
     token = "secret-for-test-1234567890"
-    monkeypatch.setattr(export_run, "api_key", lambda inference: token)
+    monkeypatch.setenv("TEST_KEY", token)
     source = tmp_path / "source"
     source.mkdir()
-    (source / "manifest.json").write_text(json.dumps({"leaked": token}))
+    (source / "manifest.json").write_text(MANIFEST)
+    (source / "summary.json").write_text(json.dumps({"leaked": token}))
     with pytest.raises(RuntimeError, match="Credential detected"):
         export_run.export(source, tmp_path / "target")
+
+
+@pytest.mark.parametrize("field", ["content", "reasoning"])
+def test_export_rejects_credential_split_across_unfinished_stream(tmp_path, monkeypatch, field):
+    key = "synthetic-local-credential-12345"
+    monkeypatch.setenv("TEST_KEY", key)
+    monkeypatch.setattr(export_run, "report", lambda root: pytest.fail("Export must stop"))
+    source, target = tmp_path / "source", tmp_path / "target"
+    attempt = source / "001"
+    attempt.mkdir(parents=True)
+    (source / "manifest.json").write_text(MANIFEST)
+    events = []
+    for index, fragment in enumerate(key):
+        chunk = {"choices": [{"index": 0, "delta": {field: fragment}, "finish_reason": None}]}
+        events.append(json.dumps({"seconds": index, "line": "data: " + json.dumps(chunk)}))
+    (attempt / "stream.jsonl").write_text("\n".join(events) + "\n")
+    with pytest.raises(RuntimeError, match="Credential detected in stream.jsonl"):
+        export_run.export(source, target)
+    assert not (target / "export.json").exists()
+
+
+def test_redacts_mounted_volume_paths_but_keeps_filenames():
+    text = json.dumps(
+        {
+            "absolute": "/Volumes/scratch/user/tmp/solver.py",
+            "relative": "Volumes/scratch/user/tmp/solver.py",
+            "traceback": "Warning\n/Volumes/scratch/user/scipy/model.py:12\n",
+            "local": "./solver.py",
+        }
+    )
+    assert json.loads(export_run.redact(text)) == {
+        "absolute": "<ABSOLUTE_PATH>/solver.py",
+        "relative": "<RELATIVE_PATH>/solver.py",
+        "traceback": "Warning\n<ABSOLUTE_PATH>/model.py:12\n",
+        "local": "./solver.py",
+    }
+
+
+def test_stream_redaction_handles_paths_split_across_chunks():
+    original = 'open("/Volumes/scratch/user/solver.py")'
+    lines = []
+    for index, char in enumerate(original):
+        chunk = {"choices": [{"index": 0, "delta": {"content": char}, "finish_reason": None}]}
+        lines.append(json.dumps({"seconds": index, "line": "data: " + json.dumps(chunk)}) + "\n")
+    redacted = [
+        json.loads(json.loads(line)["line"][6:]) for line in export_run.redacted_stream(lines)
+    ]
+    assert len(redacted) == len(lines)
+    assembled = "".join(chunk["choices"][0]["delta"]["content"] for chunk in redacted)
+    assert assembled == 'open("<ABSOLUTE_PATH>/solver.py")'
+
+
+def test_stream_keeps_server_errors():
+    error = {"error": {"code": 500, "message": "Compute error.", "type": "server_error"}}
+    lines = [
+        json.dumps({"seconds": 0.2, "line": "data: " + json.dumps(error)}) + "\n",
+        json.dumps({"seconds": 0.3, "line": "data: [DONE]"}) + "\n",
+    ]
+    assert list(export_run.redacted_stream(lines)) == lines

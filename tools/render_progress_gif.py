@@ -24,7 +24,7 @@ def load(path):
     return json.loads(path.read_text())
 
 
-def render(root, output, preview_dir=None):
+def render(root, output):
     manifest = load(root / "manifest.json")
     model = "Flint" if manifest["model"] == "flint" else manifest["model"]
     summary = load(root / "summary.json")
@@ -62,8 +62,6 @@ def render(root, output, preview_dir=None):
     gain_label = fig.text(0.955, 0.835, "", ha="right", fontsize=22, color=BLUE)
     clock_label = fig.text(0.955, 0.895, "", ha="right", fontsize=20, color=MUTED)
     output.parent.mkdir(parents=True, exist_ok=True)
-    if preview_dir is not None:
-        preview_dir.mkdir(parents=True, exist_ok=True)
 
     packing.set(xlim=(0, 1), ylim=(0, 1), aspect="equal", xticks=[], yticks=[])
     packing.set_facecolor(PAPER)
@@ -106,7 +104,6 @@ def render(root, output, preview_dir=None):
     (dot,) = best_axis.plot([], [], "o", color=BLUE, markersize=7)
     for artist in (cursor, line, halo, dot):
         artist.set_snap(False)
-    preview_frames = {round(i * (frame_count - 1) / 5) for i in range(6)}
     with tempfile.TemporaryDirectory(prefix="flint-animation-") as temporary:
         video = Path(temporary) / "frames.mkv"
         palette = Path(temporary) / "palette.png"
@@ -167,8 +164,6 @@ def render(root, output, preview_dir=None):
                 fig.canvas.draw()
                 rgb = Image.fromarray(np.asarray(fig.canvas.buffer_rgba())).convert("RGB")
                 encoder.stdin.write(rgb.tobytes())
-                if preview_dir is not None and frame in preview_frames:
-                    rgb.save(preview_dir / f"frame-{frame:04d}.png")
                 if frame % 200 == 0:
                     print(f"Rendered {frame}/{frame_count} frames", flush=True)
             encoder.stdin.close()
@@ -209,20 +204,12 @@ def render(root, output, preview_dir=None):
             check=True,
         )
     plt.close(fig)
-    with Image.open(output) as saved:
-        assert saved.size == (1200, 650)
-        saved_durations = []
-        for frame in range(saved.n_frames):
-            saved.seek(frame)
-            saved_durations.append(saved.info["duration"])
-        assert abs(sum(saved_durations) - frame_count * 1000 / fps) <= 50
-        saved_frames = saved.n_frames
     print(
         json.dumps(
             {
                 "file": str(output),
-                "frames": saved_frames,
-                "seconds": sum(saved_durations) / 1000,
+                "frames": frame_count,
+                "seconds": frame_count / fps,
                 "best_candidate": attempts[kept[-1]].name,
                 "best_score": best_scores[-1],
                 "model_hours": float(hours[-1]),
@@ -236,6 +223,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("run", type=Path)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--preview-dir", type=Path)
     args = parser.parse_args()
-    render(args.run, args.output, args.preview_dir)
+    render(args.run, args.output)

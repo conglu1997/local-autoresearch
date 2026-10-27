@@ -1,1 +1,1 @@
-"""Isolated execution of candidate programs."""
+"""Model client, team scheduling and sandboxed candidate evaluation."""

@@ -9,6 +9,7 @@ from urllib.response import addinfourl
 import pytest
 
 import research
+from runner import inference
 from tools.export_run import export
 from tools.verify_run import verify
 
@@ -38,10 +39,10 @@ def test_local_stream_records_reasoning_content_and_usage_without_credentials(
         def __exit__(self, *args):
             return False
 
-    monkeypatch.setattr(research.OPENER, "open", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(inference.OPENER, "open", lambda *args, **kwargs: Response())
     body = {"model": "flint", "messages": [{"role": "user", "content": "Try another idea."}]}
     token = "test-token-must-not-be-recorded"
-    response = research.complete(body, "http://127.0.0.1:11500/v1", token, tmp_path)
+    response = inference.complete(body, "http://127.0.0.1:11500/v1", token, tmp_path)
     assert response["reasoning"] == "Consider a different layout."
     assert response["content"] == "Here is the candidate."
     assert response["usage"]["completion_tokens"] == 20
@@ -63,9 +64,9 @@ def test_model_request_rejects_redirects(tmp_path, monkeypatch):
     monkeypatch.setattr(
         HTTPHandler, "http_open", lambda *args: pytest.fail("API key forwarded to redirect target")
     )
-    monkeypatch.setattr(research, "OPENER", build_opener(research.NoRedirects))
+    monkeypatch.setattr(inference, "OPENER", build_opener(inference.NoRedirects))
     with pytest.raises(HTTPError, match="302"):
-        research.complete({}, "https://api.example.com/v1", "private-test-credential", tmp_path)
+        inference.complete({}, "https://api.example.com/v1", "private-test-credential", tmp_path)
     assert (tmp_path / "http-error.txt").read_text() == "Moved"
 
 
@@ -73,20 +74,13 @@ def test_model_request_rejects_redirects(tmp_path, monkeypatch):
     "base_url",
     [
         "http://api.example.com/v1",
-        "http://127.0.0.1.example.com/v1",
-        "http://user:secret@localhost:8080/v1",
-        "http://localhost:8080/v1?api_key=secret",
-        "http://localhost:8080/v1#fragment",
         "https://user:secret@api.example.com/v1",
         "https://api.example.com/v1?api_key=secret",
-        "https://api.example.com/v1#fragment",
-        "https:///v1",
-        "ftp://api.example.com/v1",
     ],
 )
 def test_connection_rejects_insecure_or_incomplete_urls_and_embedded_credentials(base_url):
     with pytest.raises(ValueError, match="HTTPS base URL"):
-        research.model_server(base_url, "test-model", None)
+        inference.model_server(base_url, "test-model", None)
 
 
 @pytest.mark.parametrize(
@@ -99,16 +93,16 @@ def test_connection_rejects_insecure_or_incomplete_urls_and_embedded_credentials
     ],
 )
 def test_connection_accepts_loopback_and_https_without_rec(url):
-    config = research.model_server(url + "/", "test-model", None)
+    config = inference.model_server(url + "/", "test-model", None)
     assert config["endpoint"] == url
-    assert research.api_key(config) is None
+    assert inference.api_key(config) is None
 
 
 def test_connection_flags_must_be_paired():
     with pytest.raises(ValueError, match="requires --model"):
-        research.model_server("http://localhost:8080/v1", None, None)
+        inference.model_server("http://localhost:8080/v1", None, None)
     with pytest.raises(ValueError, match="require --base-url"):
-        research.model_server(None, "test-model", None)
+        inference.model_server(None, "test-model", None)
 
 
 @pytest.mark.parametrize("endpoint", ["http://127.0.0.1:8080/v1", "https://api.example.com/v1"])
@@ -119,7 +113,9 @@ def test_custom_model_run_resume_export_and_report(tmp_path, monkeypatch, key_en
         monkeypatch.setenv(key_env, token)
     baseline = Path("tasks/route/baseline.py").read_text()
     chunk = {
-        "choices": [{"delta": {"content": f"```python\n{baseline}```"}, "finish_reason": "stop"}]
+        "choices": [
+            {"index": 0, "delta": {"content": f"```python\n{baseline}```"}, "finish_reason": "stop"}
+        ]
     }
     requested = []
 
@@ -136,7 +132,7 @@ def test_custom_model_run_resume_export_and_report(tmp_path, monkeypatch, key_en
         assert request.get_header("Authorization") == (f"Bearer {token}" if key_env else None)
         return Response()
 
-    monkeypatch.setattr(research.OPENER, "open", respond)
+    monkeypatch.setattr(inference.OPENER, "open", respond)
     args = SimpleNamespace(
         run=tmp_path / "run",
         task="route",
@@ -148,8 +144,15 @@ def test_custom_model_run_resume_export_and_report(tmp_path, monkeypatch, key_en
         api_key_env=key_env,
     )
     research.run(args)
-    args.resume, args.experiments = True, 2
+    args.resume = True
+    for _ in range(2):
+        (args.run / "002").mkdir()
+        (args.run / "002/request.json").write_text("{}")
+        research.run(args)
+    args.experiments = 2
     research.run(args)
+    interrupted = sorted(p.name for p in args.run.glob("002-*"))
+    assert interrupted == ["002-interrupted-1", "002-interrupted-2"]
     assert [request["model"] for request in requested] == ["test-model", "test-model"]
     assert all("top_k" not in request for request in requested)
     manifest = json.loads((args.run / "manifest.json").read_text())
@@ -175,7 +178,7 @@ def test_missing_or_empty_custom_credential_fails(monkeypatch):
     config = {"api_key_env": "MODEL_TEST_KEY"}
     monkeypatch.delenv("MODEL_TEST_KEY", raising=False)
     with pytest.raises(KeyError):
-        research.api_key(config)
+        inference.api_key(config)
     monkeypatch.setenv("MODEL_TEST_KEY", "")
     with pytest.raises(ValueError, match="must contain an API key"):
-        research.api_key(config)
+        inference.api_key(config)

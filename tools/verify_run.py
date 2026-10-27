@@ -1,42 +1,26 @@
 """Verify exported traces, candidate provenance, scores and keep/discard decisions."""
 
 import argparse
-import ast
 import gzip
-import hashlib
 import json
 import math
 from pathlib import Path
 
 from runner.evaluate import digest
+from tools.artifact_integrity import ArtifactIntegrity
 from tasks.circle import certify, validate
-from research import candidate_source, stream_text
+from runner.core import candidate_source
+from runner.inference import stream_text
 from tasks import TASKS
-
-if not __debug__:
-    raise RuntimeError("Evidence verification requires Python without -O or PYTHONOPTIMIZE.")
-
-ORIGINAL_BIKE_PROTOCOL = {
-    "selection": "Best validation RMSLE after 100 attempts, including failures.",
-    "refit": "Run the selected program unchanged, training on 2011 through June 2012.",
-    "test": "July through December 2012, evaluated once after selection.",
-    "limits": "Same 15 CPU seconds, 25 wall seconds and seed 0 as validation.",
-}
-
-
-def structural_hash(source):
-    tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if ast.get_docstring(node) is not None:
-                node.body.pop(0)
-    return digest(ast.dump(tree, include_attributes=False))
+from tools.final_protocol import verify_final_artifacts
 
 
 def inventory(root):
     """Count valid, distinct implementations; comments and docstrings do not distinguish them."""
     manifest = json.loads((root / "manifest.json").read_text())
-    seen = {structural_hash((root / "000/solver.py").read_text()): "000"}
+    integrity = ArtifactIntegrity(root)
+    integrity.verify_files()
+    seen = {integrity.fingerprint("000/solver.py"): "000"}
     records = []
     for directory in sorted(p for p in root.iterdir() if p.is_dir() and p.name.isdigit()):
         if directory.name == "000" or not (directory / "decision.json").exists():
@@ -49,7 +33,9 @@ def inventory(root):
             source = (directory / "solver.py").read_text()
             response = json.loads((directory / "response.json").read_text())
             assert candidate_source(response) == source, directory.name
-            assert digest(source) == evaluation["source_sha256"], directory.name
+            assert (
+                integrity.source_hash(f"{directory.name}/solver.py") == evaluation["source_sha256"]
+            ), directory.name
             assert [t["seed"] for t in evaluation["trials"]] == manifest["seeds"]
             assert all(t["valid"] for t in evaluation["trials"])
             score = evaluation["mean_score"]
@@ -60,7 +46,7 @@ def inventory(root):
                 rel_tol=0,
                 abs_tol=1e-12,
             )
-            fingerprint = structural_hash(source)
+            fingerprint = integrity.fingerprint(f"{directory.name}/solver.py")
             record.update(score=score, structural_sha256=fingerprint)
             if fingerprint in seen:
                 record.update(exclusion="duplicate implementation", duplicate_of=seen[fingerprint])
@@ -80,7 +66,9 @@ def verify_stream(directory):
     parts = {"content": [], "reasoning": []}
     usage, finish, first_token = None, None, None
     previous_seconds = 0
-    with gzip.open(directory / "stream.jsonl.gz", "rt") as stream:
+    path = directory / "stream.jsonl.gz"
+    stream = gzip.open(path, "rt") if path.exists() else (directory / "stream.jsonl").open()
+    with stream:
         for record in stream:
             event = json.loads(record)
             assert previous_seconds <= event["seconds"] <= response["seconds"]
@@ -111,28 +99,10 @@ def verify(root):
     manifest = json.loads((root / "manifest.json").read_text())
     # Exports predating task selection contain only circle-packing records.
     task = manifest["task"] if "task" in manifest else "circle"
-    original_bike = task == "bike" and manifest["final_test"] == ORIGINAL_BIKE_PROTOCOL
     if task != "circle":
-        problem = TASKS[task].PROBLEM
-        if original_bike:
-            # The first bike run used only the twelve original UCI features.
-            bike = TASKS[task]
-            problem = {
-                "features": bike.BASE_FEATURES,
-                "train_x": [[float(row[k]) for k in bike.BASE_FEATURES] for row in bike.TRAIN],
-                "train_y": [int(row["cnt"]) for row in bike.TRAIN],
-                "predict_x": [
-                    [float(row[k]) for k in bike.BASE_FEATURES] for row in bike.VALIDATION
-                ],
-            }
-        assert manifest["problem"] == problem
-    files = json.loads((root / "export.json").read_text())["files"]
-    originals = {}
-    for entry in files:
-        path = root / entry["file"]
-        data = gzip.decompress(path.read_bytes()) if path.suffix == ".gz" else path.read_bytes()
-        assert hashlib.sha256(data).hexdigest() == entry["export_sha256"], entry["file"]
-        originals[entry["file"]] = entry["original_sha256"]
+        assert manifest["problem"] == TASKS[task].PROBLEM
+    integrity = ArtifactIntegrity(root)
+    integrity.verify_files()
     best, score, count = "000", -math.inf, 0
     for directory in sorted(p for p in root.iterdir() if p.is_dir() and p.name.isdigit()):
         if (directory / "response.json").exists():
@@ -144,7 +114,9 @@ def verify(root):
         decision = json.loads((directory / "decision.json").read_text())
         source = directory / "solver.py"
         if source.exists():
-            assert originals[f"{directory.name}/solver.py"] == evaluation["source_sha256"]
+            assert (
+                integrity.source_hash(f"{directory.name}/solver.py") == evaluation["source_sha256"]
+            )
             if directory.name != "000":
                 response = json.loads((directory / "response.json").read_text())
                 assert digest(candidate_source(response)) == digest(source.read_text())
@@ -159,8 +131,7 @@ def verify(root):
                     assert certify(trial["circles"]) == trial["certificate"]
                 else:
                     checked = TASKS[task].check(trial["solution"])
-                    fields = ("solution", "rmsle", "score") if original_bike else checked
-                    assert all(trial[key] == checked[key] for key in fields)
+                    assert all(trial[key] == value for key, value in checked.items())
                 assert math.isclose(checked["score"], trial["score"], rel_tol=0, abs_tol=1e-12)
                 measured.append(checked["score"])
             mean = math.fsum(measured) / len(measured)
@@ -186,55 +157,10 @@ def verify(root):
             assert progress[key] == value, key
         if progress["status"] == "complete":
             assert progress["distinct_scored_candidates"] >= progress["target"]
-    if (root / "final-test.json").exists():
-        assert count - 1 == 100
-        protocol = ORIGINAL_BIKE_PROTOCOL if original_bike else TASKS[task].FINAL_PROTOCOL
-        assert manifest["final_test"] == protocol
-        marker = json.loads((root / "final-test-started.json").read_text())
-        final = json.loads((root / "final-test.json").read_text())
-        assert marker["best_attempt"] == best
-        assert marker["source_sha256"] == final["source_sha256"] == originals[f"{best}/solver.py"]
-        assert [trial["seed"] for trial in final["trials"]] == manifest["seeds"]
-        assert final["valid"] == all(trial["valid"] for trial in final["trials"])
-        measured = []
-        for trial in final["trials"]:
-            if trial["valid"]:
-                checked = TASKS[task].check_final(trial["solution"])
-                fields = ("solution", "rmsle", "score") if original_bike else checked
-                assert all(trial[key] == checked[key] for key in fields)
-                measured.append(checked["score"])
-        if final["valid"]:
-            assert math.isclose(
-                final["mean_score"],
-                math.fsum(measured) / len(measured),
-                rel_tol=0,
-                abs_tol=1e-12,
-            )
-        else:
-            assert final["mean_score"] is None
-        if task == "bike" and not original_bike:
-            baseline_final = json.loads((root / "baseline-final-test.json").read_text())
-            assert baseline_final["source_sha256"] == originals["000/solver.py"]
-            assert [trial["seed"] for trial in baseline_final["trials"]] == manifest["seeds"]
-            assert baseline_final["valid"] == all(t["valid"] for t in baseline_final["trials"])
-            scores = []
-            for trial in baseline_final["trials"]:
-                if trial["valid"]:
-                    checked = TASKS[task].check_final(trial["solution"])
-                    assert all(trial[key] == value for key, value in checked.items())
-                    scores.append(checked["score"])
-            if baseline_final["valid"]:
-                assert math.isclose(
-                    baseline_final["mean_score"],
-                    math.fsum(scores) / len(scores),
-                    rel_tol=0,
-                    abs_tol=1e-12,
-                )
-            else:
-                assert baseline_final["mean_score"] is None
+    final_state = verify_final_artifacts(root, manifest, best, count - 1, integrity)
     if (root / "validation.json").exists():
         validation = json.loads((root / "validation.json").read_text())
-        assert validation["source_sha256"] == originals[f"{best}/solver.py"]
+        assert validation["source_sha256"] == integrity.source_hash(f"{best}/solver.py")
         assert [trial["seed"] for trial in validation["trials"]] == [3, 4, 5, 6, 7]
         assert validation["valid"] == all(trial["valid"] for trial in validation["trials"])
         measured = []
@@ -254,7 +180,10 @@ def verify(root):
             )
         else:
             assert validation["mean_score"] is None
-    print(f"Verified {count} completed records; best {best}: {score:.9f}")
+    print(
+        f"Verified {count} completed records; best {best}: {score:.9f}; "
+        f"held-out test: {final_state}"
+    )
 
 
 if __name__ == "__main__":

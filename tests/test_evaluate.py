@@ -7,7 +7,7 @@ import pytest
 
 from runner.evaluate import run_seed
 from tasks.circle import certify, validate
-from research import candidate_source
+from runner.core import candidate_source
 from tasks.circle.baseline import solve
 from runner import evaluate as evaluator
 

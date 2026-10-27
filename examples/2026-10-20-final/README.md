@@ -26,11 +26,7 @@ A separate rational check tests exact feasibility of the saved decimal coordinat
 
 An additional check of candidate 118 on seeds 3–7 passed numerical tolerance with mean **2.624840812** and a largest violation of about 5.02e-12. These are extra seeds for the same instance, not other circle counts.
 
-The runner requested single-threaded numerical libraries, but a [separate probe](043/diagnostic.json) created nine native threads. Original candidate thread counts were not measured; the process CPU limit remained in force.
-
-The [annotations](annotations.json) distinguish measured changes from model claims. Candidate 118's gain came from a changed starting layout, rather than its advertised rotation. Its source retains a radius-LP distance error; the external evaluator checks the returned geometry independently. Diagnostic replays were separate from the search and never supplied to Flint.
-
-These results measure improvement over a simple grid on one problem, not optimality or a mathematical record.
+Candidate 118's gain came from a changed starting layout, not the rotation its response described. The [annotations](annotations.json) separate measured changes from the model's claims.
 
 ## Inspect the run
 

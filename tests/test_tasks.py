@@ -10,6 +10,7 @@ from tasks import TASKS, route, schedule, sequence
 from tasks.route.baseline import solve as route_baseline
 from tasks.schedule.baseline import solve as schedule_baseline
 import research
+from runner import inference
 
 
 def test_route_recomputes_closed_tour():
@@ -85,7 +86,7 @@ def test_runner_records_single_trial_and_rejects_changed_evaluator(tmp_path, mon
         "version": "test",
     }
     monkeypatch.setattr(
-        research.subprocess,
+        inference.subprocess,
         "check_output",
         lambda command, **kwargs: json.dumps(status) if command[1] == "status" else "test-key",
     )

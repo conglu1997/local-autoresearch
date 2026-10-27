@@ -1,185 +1,16 @@
 """A model proposes; the local evaluator measures; improvements become the next parent."""
 
 import argparse
-import ast
 import hashlib
 import json
-import os
-import re
-import subprocess
-import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.error import HTTPError
-from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from runner.core import candidate_source, feedback, make_prompt, save
 from runner.evaluate import CPU_SECONDS, ROOT, WALL_SECONDS, evaluate
+from runner.inference import api_key, complete, model_server
+from runner.teams import WORKERS
 from tasks import TASKS
-
-
-class NoRedirects(HTTPRedirectHandler):
-    """Keep API credentials on the configured endpoint."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-OPENER = build_opener(NoRedirects)
-
-
-def save(path, value):
-    path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
-
-
-def api_key(inference):
-    if "api_key_env" not in inference:
-        return subprocess.check_output(["rec", "auth", "token"], text=True).strip()
-    name = inference["api_key_env"]
-    if name is None:
-        return None
-    key = os.environ[name].strip()
-    if not key:
-        raise ValueError(f"{name} must contain an API key")
-    return key
-
-
-def model_server(base_url, model, api_key_env):
-    if base_url is None:
-        if model is not None or api_key_env is not None:
-            raise ValueError("--model and --api-key-env require --base-url")
-        status = json.loads(subprocess.check_output(["rec", "status"], text=True))
-        if not status["ready"] or status["model"] != "flint":
-            raise RuntimeError("Start the local Flint server before running research")
-    else:
-        if not model:
-            raise ValueError("--base-url requires --model")
-        status = {
-            "endpoint": base_url.rstrip("/"),
-            "model": model,
-            "api_key_env": api_key_env,
-        }
-    url = urlsplit(status["endpoint"])
-    if (
-        url.scheme not in {"http", "https"}
-        or not url.hostname
-        or (url.scheme == "http" and url.hostname not in {"127.0.0.1", "localhost", "::1"})
-        or url.username is not None
-        or url.password is not None
-        or url.query
-        or url.fragment
-    ):
-        raise ValueError(
-            "Use an HTTPS base URL or a loopback HTTP URL, "
-            "without credentials, query parameters or fragments"
-        )
-    return status
-
-
-def stream_text(delta):
-    return {
-        "content": delta.get("content") or "",
-        "reasoning": delta.get("reasoning") or delta.get("reasoning_content") or "",
-    }
-
-
-def feedback(result):
-    if "trials" not in result:
-        return result
-    return {
-        "valid": result["valid"],
-        "mean_score": result["mean_score"],
-        "trials": [
-            {
-                key: value
-                for key, value in trial.items()
-                if key not in ("circles", "certificate", "solution", "correlations")
-            }
-            for trial in result["trials"]
-        ],
-    }
-
-
-def complete(body, endpoint, key, directory):
-    save(directory / "request.json", body)
-    headers = {"Content-Type": "application/json"}
-    if key is not None:
-        headers["Authorization"] = "Bearer " + key
-    request = Request(
-        endpoint + "/chat/completions",
-        data=json.dumps(body).encode(),
-        headers=headers,
-    )
-    started = time.monotonic()
-    text, reasoning, usage, finish = "", "", None, None
-    first_token = None
-    try:
-        with (
-            OPENER.open(request, timeout=300) as response,
-            (directory / "stream.jsonl").open("w") as log,
-        ):
-            for raw in response:
-                line = raw.decode().rstrip("\r\n")
-                elapsed = time.monotonic() - started
-                log.write(json.dumps({"seconds": elapsed, "line": line}, ensure_ascii=False) + "\n")
-                log.flush()
-                if not line.startswith("data: ") or line == "data: [DONE]":
-                    continue
-                chunk = json.loads(line[6:])
-                if chunk.get("usage") is not None:
-                    usage = chunk["usage"]
-                for choice in chunk["choices"]:
-                    delta = stream_text(choice["delta"])
-                    content, thought = delta["content"], delta["reasoning"]
-                    text += content
-                    reasoning += thought
-                    if first_token is None and (content or thought):
-                        first_token = elapsed
-                    if choice["finish_reason"] is not None:
-                        finish = choice["finish_reason"]
-    except HTTPError as error:
-        (directory / "http-error.txt").write_text(error.read().decode())
-        raise
-    result = {
-        "content": text,
-        "reasoning": reasoning,
-        "usage": usage,
-        "finish_reason": finish,
-        "seconds": time.monotonic() - started,
-        "first_token_seconds": first_token,
-    }
-    save(directory / "response.json", result)
-    (directory / "response.txt").write_text(text)
-    return result
-
-
-def candidate_source(response):
-    if response["finish_reason"] != "stop":
-        raise ValueError(f"Model response did not finish: {response['finish_reason']}")
-    blocks = re.findall(r"```python\s*\n(.*?)```", response["content"], re.DOTALL)
-    if len(blocks) != 1:
-        raise ValueError("Expected exactly one complete Python code block")
-    source = blocks[0].strip() + "\n"
-    ast.parse(source)
-    return source
-
-
-def make_prompt(brief, best, ledger):
-    prompt = (
-        brief
-        + "\nCurrent best solver:\n```python\n"
-        + (best / "solver.py").read_text()
-        + "```\nRecent results:\n"
-        + json.dumps(ledger[-4:], indent=2)
-    )
-    previous = best.parent / ledger[-1]["attempt"]
-    if previous != best and (previous / "solver.py").exists():
-        prompt += (
-            f"\nPrevious attempt ({ledger[-1]['decision']}):\n```python\n"
-            + (previous / "solver.py").read_text()
-            + "```\n"
-        )
-    return prompt + "\nWhat would you try next?"
 
 
 def run(args):
@@ -200,6 +31,8 @@ def run(args):
         fixed_files = [
             "research.py",
             "runner/__init__.py",
+            "runner/core.py",
+            "runner/inference.py",
             "runner/evaluate.py",
             "runner/worker.py",
             "uv.lock",
@@ -211,7 +44,7 @@ def run(args):
             for path in sorted((ROOT / "tasks" / args.task).glob("*.csv"))
         ]
         if hasattr(TASKS[args.task], "FINAL_PROTOCOL"):
-            fixed_files += ["tools/__init__.py", "tools/final_test.py"]
+            fixed_files += ["tools/__init__.py", "tools/final_test.py", "tools/final_protocol.py"]
         manifest = {
             "task": args.task,
             "started_at": datetime.now(timezone.utc).isoformat(),
@@ -252,6 +85,10 @@ def run(args):
     task = manifest["task"]
     brief = ROOT / f"tasks/{task}/program.md"
     attempts = sorted(path for path in root.iterdir() if path.is_dir() and path.name.isdigit())
+    if not (attempts[-1] / "decision.json").exists():
+        interrupted = attempts.pop()
+        earlier = len(list(root.glob(f"{interrupted.name}-interrupted-*")))
+        interrupted.rename(root / f"{interrupted.name}-interrupted-{earlier + 1}")
     best = root / "000"
     ledger = []
     for path in attempts:
@@ -298,7 +135,7 @@ def run(args):
     print(f"Done. Best attempt: {best.name}, score: {best_score:.9f}", flush=True)
 
 
-if __name__ == "__main__":
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument(
@@ -312,4 +149,17 @@ if __name__ == "__main__":
     )
     parser.add_argument("--model", help="Model ID served at --base-url; defaults to Flint via rec")
     parser.add_argument("--api-key-env", help="Environment variable holding the API key")
-    run(parser.parse_args())
+    parser.add_argument("--hours", type=float, help="Run a team of workers for this long instead")
+    parser.add_argument("--workers", type=int, default=WORKERS, help="Team size")
+    parser.add_argument("--replicate", type=int, default=0, help="Team direction offset")
+    args = parser.parse_args(argv)
+    if args.hours is None:
+        run(args)
+    else:
+        from runner.parallel import run as run_team
+
+        run_team(args)
+
+
+if __name__ == "__main__":
+    main()

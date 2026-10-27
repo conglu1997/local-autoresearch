@@ -342,15 +342,7 @@ def art(fig, spec, data, bounds):
 
 
 def save(fig, name):
-    output = OUTPUT
-    output.mkdir(parents=True, exist_ok=True)
-    for extension in ("png", "svg"):
-        fig.savefig(
-            output / f"{name}.{extension}",
-            dpi=150,
-            facecolor=PAPER,
-            metadata={"Date": None} if extension == "svg" else None,
-        )
+    fig.savefig(OUTPUT / f"{name}.png", dpi=150, facecolor=PAPER)
     plt.close(fig)
 
 
@@ -705,8 +697,6 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=Path, default=OUTPUT)
     parser.add_argument(
         "--bike-hours",
-        "--bike-gif-hours",
-        dest="bike_hours",
         type=float,
         default=3.0,
         help="Bike chart and playback window in recorded model hours",
@@ -736,8 +726,6 @@ if __name__ == "__main__":
             "text.color": INK,
             "axes.labelcolor": MUTED,
             "axes.labelsize": 9,
-            "svg.fonttype": "none",
-            "svg.hashsalt": "flint-autoresearch",
         }
     )
     experiments = []
@@ -774,5 +762,3 @@ if __name__ == "__main__":
         fig.set_dpi(120)
     if not args.still_only:
         animate_overview(fig, tracks, mp4_only=args.mp4_only)
-    if not args.mp4_only:
-        save(fig, "overview")
