@@ -31,6 +31,8 @@ uv run python report.py runs/circle-demo
 
 Open `runs/circle-demo/report.html` to see your results. Each candidate gets 15 CPU seconds and 25 wall seconds; model generation takes additional time.
 
+For a tool-using agent, use [the separate `research_agent.py` entry point](docs/running.md#agent-mode). Each round starts a fresh conversation with up to 128 model calls by default: the agent can inspect earlier versions and their summaries through tools, edit its solver and submit it with a short explanation for evaluation. The original `research.py` workflow remains available.
+
 [Running, resuming and saving experiments](docs/running.md) · [All tasks](tasks/README.md) · [Add a task](docs/add-a-task.md)
 
 ## Circle packing
@@ -89,17 +91,18 @@ Start with [a small change to an existing solver](docs/add-a-task.md#tweak-a-bas
 
 ## Develop
 
-The two top-level scripts are the main entry points:
+The top-level scripts are the main entry points:
 
 ```text
-research.py   Run a search with Flint
-report.py     Turn a saved run into an HTML report
-tasks/        Problem inputs, baselines, scoring and prompts
-runner/       Model client, eight-worker scheduling and sandboxed evaluation
-tools/        Export, verify and rebuild figures
-examples/     The three completed experiments
-docs/         Setup and task-writing guides
-tests/        Checks for the runner and tasks
+research.py        Run a search with Flint
+research_agent.py  Inspect history, edit and submit through tools
+report.py          Turn a saved run into an HTML report
+tasks/             Problem inputs, baselines, scoring and prompts
+runner/            Model client, eight-worker scheduling and sandboxed evaluation
+tools/             Export, verify and rebuild figures
+examples/          The three completed experiments
+docs/              Setup and task-writing guides
+tests/             Checks for the runner and tasks
 ```
 
 To change a solver, start with its baseline, such as [the circle solver](tasks/circle/baseline.py). See [resource limits](docs/running.md#start-and-inspect-a-search) for how candidates run.

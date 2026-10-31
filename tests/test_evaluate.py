@@ -99,6 +99,7 @@ def test_cpu_budget_is_enforced(monkeypatch):
     assert not result["valid"]
     assert result["exit_code"] != 0
     assert result["wall_seconds"] < 5
+    assert result["failure_kind"] == "timeout" and "CPU" in result["error"]
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS isolated execution")
@@ -107,6 +108,7 @@ def test_wall_budget_is_enforced(monkeypatch):
     result = run_seed("import time\ntime.sleep(10)\n", 0)
     assert not result["valid"]
     assert result["timeout"]
+    assert result["failure_kind"] == "timeout" and "Wall" in result["error"]
 
 
 @pytest.mark.parametrize("name", ["stdout.txt", "stderr.txt"])
@@ -173,3 +175,47 @@ def solve(n, seed, budget):
     assert result["exit_code"] == 0
     assert not result["valid"]
     assert "error" in result
+
+
+@pytest.mark.parametrize(
+    "task,source,kind",
+    [
+        (
+            "circle",
+            "def solve(n, seed, budget):\n    return [[.5, .5, .1]] * n\n",
+            "constraint_violation",
+        ),
+        ("route", "def solve(problem, seed, budget):\n    return []\n", "constraint_violation"),
+        ("circle", "raise RuntimeError('deliberate failure')\n", "runtime_error"),
+        (
+            "circle",
+            "from pathlib import Path\ndef solve(n, seed, budget):\n    Path('solution.json').write_text('not json')\n    raise SystemExit(0)\n",
+            "invalid_output",
+        ),
+    ],
+)
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS isolated execution")
+def test_generic_failure_details_and_original_invalid_output(task, source, kind):
+    import research
+
+    result = run_seed(source, 0, task)
+    assert not result["valid"] and result["failure_kind"] == kind and result["error"]
+    if kind != "runtime_error":
+        assert result["failed_output"]
+    feedback = research.feedback({"valid": False, "mean_score": None, "trials": [result]})
+    assert feedback["failure_kind"] == kind and feedback["error_summary"]
+    assert "failed_output" not in feedback["trials"][0]
+
+
+@pytest.mark.parametrize("measurement", ["cpu_seconds", "wall_seconds"])
+def test_measured_overrun_has_timeout_feedback(monkeypatch, measurement):
+    from runner.core import feedback
+
+    trial = {"valid": True, "score": 1.0, "cpu_seconds": 0.1, "wall_seconds": 0.1}
+    limit = evaluator.CPU_SECONDS if measurement == "cpu_seconds" else evaluator.WALL_SECONDS
+    trial[measurement] = limit + 0.1
+    monkeypatch.setattr(evaluator, "run_seed", lambda *args, **kwargs: trial)
+    result = evaluator.evaluate("unused source", [0], "route")
+    assert not result["valid"] and result["mean_score"] is None
+    assert feedback(result)["failure_kind"] == "timeout"
+    assert "execution time exceeded" in feedback(result)["error_summary"]

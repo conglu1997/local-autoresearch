@@ -19,12 +19,61 @@ def load(path):
     return json.loads(path.read_text())
 
 
+def model_record(directory):
+    """Return display fields and evidence links for either research entry point."""
+    if (directory / "agent.json").exists():
+        agent = load(directory / "agent.json")
+        steps = sorted((directory / "calls").iterdir(), key=lambda p: int(p.name))
+        responses = [load(step / "response.json") for step in steps]
+        response = {
+            "content": json.dumps(
+                [
+                    {
+                        k: v
+                        for k, v in message.items()
+                        if k not in ("reasoning", "reasoning_details")
+                    }
+                    for message in agent["messages"]
+                ],
+                indent=2,
+                ensure_ascii=False,
+            ),
+            "reasoning": "\n\n".join(r["reasoning"] for r in responses),
+            "seconds": sum(r["seconds"] for r in responses),
+            "finish_reason": "submitted" if agent["submitted"] else agent["error"],
+            "usage": {"completion_tokens": sum(r["usage"]["completion_tokens"] for r in responses)}
+            if all(r["usage"] is not None for r in responses)
+            else None,
+        }
+        label = "Agent conversation and tool results"
+        links = [f'<a href="{directory.name}/agent.json">Full agent transcript</a>']
+        if (directory / "submission.json").exists():
+            links.append(f'<a href="{directory.name}/submission.json">Submission summary</a>')
+    else:
+        response = load(directory / "response.json")
+        steps, label, links = [directory], "Model response — verbatim", []
+    for step in steps:
+        relative = step.relative_to(directory.parent)
+        stream = "stream.jsonl.gz" if (step / "stream.jsonl.gz").exists() else "stream.jsonl"
+        prefix = f"Call {step.name}: " if len(relative.parts) > 1 else ""
+        links.append(
+            f'{prefix}<a href="{relative}/request.json">Full request</a> · '
+            f'<a href="{relative}/{stream}">Raw stream</a>'
+        )
+    return response, label, " · ".join(links)
+
+
 def report(root):
     manifest = load(root / "manifest.json")
     if "parallel" in manifest:
         from tools.team_report import parallel_report
 
         return parallel_report(root, manifest)
+    agent_mode = "agent" in manifest
+    if agent_mode:
+        from research_agent import attempt_info
+    summary_column = "<th>Attempt summary</th>" if agent_mode else ""
+    history_open, response_open = (" open", "") if agent_mode else ("", " open")
     model = "Flint" if manifest["model"] == "flint" else manifest["model"]
     task = manifest["task"] if "task" in manifest else "circle"
     score_label = "Σr" if len(manifest["seeds"]) == 1 else "mean Σr"
@@ -34,7 +83,9 @@ def report(root):
         else "First trial shown; score averaged over the recorded search seeds."
     )
     annotations = load(root / "annotations.json") if (root / "annotations.json").exists() else {}
-    attempts = sorted(p for p in root.iterdir() if p.is_dir() and p.name.isdigit())
+    attempts = sorted(
+        (p for p in root.iterdir() if p.is_dir() and p.name.isdigit()), key=lambda p: int(p.name)
+    )
     completed = [p for p in attempts if (p / "decision.json").exists()]
     best = root / "000"
     rows, cards, scores, best_scores = [], [], [], []
@@ -63,10 +114,25 @@ def report(root):
             if directory.name == "000"
             else f'<a href="#attempt-{directory.name}">{directory.name}</a>'
         )
-        rows.append(f"<tr><td>{attempt_link}</td><td>{score}</td><td>{outcome}</td></tr>")
+        summary = ""
+        summary_label = "Submission summary"
+        if agent_mode:
+            info = attempt_info(directory, result)
+            summary = html.escape(info["summary"] or "")
+            if info["summary_source"] == "system":
+                summary_label = "System note"
+        summary_cell = f'<td style="overflow-wrap:anywhere">{summary}</td>' if agent_mode else ""
+        rows.append(
+            f"<tr><td>{attempt_link}</td><td>{score}</td><td>{outcome}</td>{summary_cell}</tr>"
+        )
+        submission_note = (
+            f'<p style="overflow-wrap:anywhere"><strong>{summary_label}:</strong> {summary}</p>'
+            if summary
+            else ""
+        )
         if directory.name == "000":
             continue
-        response = load(directory / "response.json")
+        response, response_label, response_links = model_record(directory)
         total_seconds += response["seconds"]
         if response["usage"] is None:
             usage_complete = False
@@ -74,14 +140,23 @@ def report(root):
             tokens += response["usage"]["completion_tokens"]
         parent = root / decision["parent"] / "solver.py"
         code_file = directory / "solver.py"
-        diff = "No executable candidate was extracted."
+        if agent_mode and not code_file.exists() and (directory / "draft.py").exists():
+            code_file = directory / "draft.py"
+            response_links += (
+                f' · <a href="{directory.name}/draft.py">Last draft (not evaluated)</a>'
+            )
+        diff = (
+            "No candidate was submitted."
+            if agent_mode
+            else "No executable candidate was extracted."
+        )
         if code_file.exists():
             diff = "".join(
                 difflib.unified_diff(
                     parent.read_text().splitlines(True),
                     code_file.read_text().splitlines(True),
                     fromfile=f"{decision['parent']}/solver.py",
-                    tofile=f"{directory.name}/solver.py",
+                    tofile=f"{directory.name}/{code_file.name}",
                 )
             )
         trial_details = {key: value for key, value in result.items() if key != "trials"}
@@ -100,17 +175,17 @@ def report(root):
             if (directory / "diagnostic.json").exists()
             else ""
         )
-        stream = "stream.jsonl.gz" if (directory / "stream.jsonl.gz").exists() else "stream.jsonl"
         cards.append(f'''<article id="attempt-{directory.name}">
 <h2>{directory.name} <span class="{outcome}">{outcome}</span> <span class="score">{score}</span></h2>
 <p class="note">Parent {decision["parent"]} · {response["seconds"]:.1f}s request time · finish: {html.escape(str(response["finish_reason"]))}</p>
+{submission_note}
 {annotation}
 {diagnostic}
-<details open><summary>Model response — verbatim</summary><pre>{html.escape(response["content"])}</pre></details>
+<details{response_open}><summary>{response_label}</summary><pre>{html.escape(response["content"])}</pre></details>
 <details><summary>Recorded reasoning</summary><pre>{html.escape(response["reasoning"])}</pre></details>
 <details><summary>Change from parent</summary><pre>{html.escape(diff)}</pre></details>
 <details><summary>Evaluator output</summary><pre>{html.escape(json.dumps(trial_details, indent=2))}</pre></details>
-<p><a href="{directory.name}/request.json">Full request</a> · <a href="{directory.name}/{stream}">Raw stream</a> · <a href="{directory.name}/evaluation.json">Solution &amp; measurements</a></p>
+<p>{response_links} · <a href="{directory.name}/evaluation.json">Solution &amp; measurements</a></p>
 </article>''')
     if task != "circle":
         task_report(root, task, model, completed, best, scores, best_scores, cards)
@@ -248,7 +323,7 @@ body{{margin:0;background:#faf9f6;color:#24212a;font:16px/1.6 system-ui,sans-ser
 <details><summary>Best candidate across all search seeds</summary><img src="best-seeds.svg" alt="The retained candidate's unchanged packing for each search seed"></details>
 <p class="note">Red crosses mark invalid attempts at the baseline level, not a measured score. Best candidate exact decimal feasibility: {exact}/{len(best_result["trials"])} search seeds. Generated tokens: {tokens if usage_complete else "unknown (API usage incomplete)"}.</p>
 <p class="note">Highest mean score with exact decimal feasibility on every search seed: {exact_link}, Σr = {exact_score:.12f}.</p>
-<details><summary>Experiment ledger</summary><table><tr><th>Attempt</th><th>{score_label}</th><th>Decision</th></tr>{"".join(rows)}</table></details>{validation}
+<details{history_open}><summary>Experiment ledger</summary><table><tr><th>Attempt</th><th>{score_label}</th><th>Decision</th>{summary_column}</tr>{"".join(rows)}</table></details>{validation}
 {"".join(cards)}<footer>{html.escape(model)} proposed the solver changes; the evaluator and baseline stayed fixed. <a href="manifest.json">Run manifest</a>.</footer></main></html>"""
     (root / "report.html").write_text(document)
     print(root / "report.html")

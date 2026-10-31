@@ -48,7 +48,10 @@ def attempt(directory):
     signal.setitimer(signal.ITIMER_REAL, max(0.001, job["deadline"] - time.time()))
     try:
         body = json.loads((directory / "request.json").read_text())
-        response = complete(body, inference["endpoint"], api_key(inference), directory)
+        # The team scheduler owns retries and the worker's deadline.
+        response = complete(
+            body, inference["endpoint"], api_key(inference), directory, max_retries=0
+        )
         try:
             source = candidate_source(response)
         except (ValueError, SyntaxError) as error:

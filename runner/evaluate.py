@@ -128,13 +128,39 @@ def run_seed(source, seed, task="circle", *, final=False):
             "valid": False,
         }
         if process.returncode != 0 or timeout:
+            cpu_limit = process.returncode == -signal.SIGXCPU or (
+                process.returncode == -signal.SIGKILL and result["cpu_seconds"] >= CPU_SECONDS - 0.1
+            )
+            result["failure_kind"] = "timeout" if timeout or cpu_limit else "runtime_error"
+            result["error"] = (
+                f"Wall time limit exceeded ({WALL_SECONDS} seconds)"
+                if timeout
+                else f"CPU time limit exceeded ({CPU_SECONDS} seconds)"
+                if cpu_limit
+                else f"Solver exited with code {process.returncode}: "
+                + (stderr_text.strip().splitlines()[-1] if stderr_text.strip() else "no stderr")
+            )
+            if solution_bytes:
+                result["failed_output"] = solution_bytes.decode("utf-8", errors="backslashreplace")
             return result
         try:
             solution = json.loads(solution_bytes)
+        except (ValueError, UnicodeDecodeError, RecursionError) as error:
+            result.update(
+                failure_kind="invalid_output",
+                error=str(error),
+                failed_output=solution_bytes.decode("utf-8", errors="backslashreplace"),
+            )
+            return result
+        try:
             checker = TASKS[task].check_final if final else TASKS[task].check
             result.update(checker(solution))
         except (ValueError, OverflowError, RecursionError) as error:
-            result["error"] = str(error)
+            result.update(
+                failure_kind="constraint_violation",
+                error=str(error),
+                failed_output=solution_bytes.decode("utf-8", errors="backslashreplace"),
+            )
             return result
         result["valid"] = True
         return result
@@ -145,6 +171,7 @@ def evaluate(source, seeds=SEEDS, task="circle", *, final=False):
     for trial in trials:
         if trial["cpu_seconds"] > CPU_SECONDS or trial["wall_seconds"] > WALL_SECONDS:
             trial["valid"] = False
+            trial["failure_kind"] = "timeout"
             trial["error"] = "Measured execution time exceeded the frozen limit"
     valid = all(trial["valid"] for trial in trials)
     return {

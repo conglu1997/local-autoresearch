@@ -1,3 +1,5 @@
+import gzip
+import io
 import json
 from io import BytesIO
 from pathlib import Path
@@ -11,7 +13,35 @@ import pytest
 import research
 from runner import inference
 from tools.export_run import export
-from tools.verify_run import verify
+from tools.verify_run import verify, verify_stream
+
+
+@pytest.mark.parametrize("failure", ["http", "json"])
+def test_transport_failures_keep_evidence_and_name_its_location(tmp_path, monkeypatch, failure):
+    calls = []
+    body = b'{"error":{"code":400,"message":"Inference request failed"}}'
+    partial = b'data: {"choices":'
+
+    def respond(request, **kwargs):
+        calls.append(request)
+        if failure == "http":
+            raise HTTPError(request.full_url, 400, "Bad Request", {}, io.BytesIO(body))
+        return io.BytesIO(partial)
+
+    monkeypatch.setattr(inference.OPENER, "open", respond)
+    with pytest.raises(HTTPError if failure == "http" else json.JSONDecodeError) as caught:
+        inference.complete(
+            {}, "https://api.example.com/v1", "test-credential", tmp_path, max_retries=0
+        )
+    assert len(calls) == 1
+    assert str(tmp_path) in caught.value.__notes__[0]
+    assert (tmp_path / "request.json").is_file()
+    if failure == "http":
+        assert (tmp_path / "http-error.txt").read_bytes() == body
+    else:
+        event = json.loads((tmp_path / "stream.jsonl").read_text())
+        assert event["line"] == partial.decode()
+    assert not (tmp_path / "response.json").exists()
 
 
 @pytest.mark.parametrize("reasoning_field", ["reasoning", "reasoning_content"])
@@ -105,6 +135,54 @@ def test_connection_flags_must_be_paired():
         inference.model_server(None, "test-model", None)
 
 
+@pytest.mark.parametrize("stream_error", [False, True])
+def test_stream_preserves_usage_provenance_and_errors(tmp_path, monkeypatch, stream_error):
+    content = "```python\ndef solve(problem, seed, budget):\n    return []\n```"
+    chunks = [
+        {
+            "id": "gen-test",
+            "model": "test-model",
+            "provider": "Test Provider",
+            "choices": [{"delta": {"content": content}, "finish_reason": "stop"}],
+        },
+    ]
+    if stream_error:
+        chunks.append({"error": {"code": 502, "message": "Provider disconnected"}})
+    usage = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30, "cost": 0.001}
+    chunks.append({"choices": [], "usage": usage})
+    stream = ": PROCESSING\n\n"
+    stream += "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+    stream += "data: [DONE]\n\n"
+    monkeypatch.setattr(inference.OPENER, "open", lambda *a, **kw: io.BytesIO(stream.encode()))
+    if stream_error:
+        with pytest.raises(RuntimeError, match="Provider disconnected"):
+            inference.complete(
+                {}, "https://api.example.com/v1", "private-token", tmp_path, max_retries=0
+            )
+        result = json.loads((tmp_path / "response.json").read_text())
+    else:
+        result = inference.complete({}, "https://api.example.com/v1", "private-token", tmp_path)
+    assert result["id"] == "gen-test"
+    assert result["model"] == "test-model"
+    assert result["provider"] == "Test Provider"
+    assert result["usage"] == usage
+    if stream_error:
+        assert result["error"]["code"] == 502
+        with pytest.raises(ValueError, match="did not finish: error"):
+            research.candidate_source(result)
+    else:
+        assert research.candidate_source(result).startswith("def solve(")
+    assert all("private-token" not in path.read_text() for path in tmp_path.iterdir())
+    (tmp_path / "stream.jsonl.gz").write_bytes(
+        gzip.compress((tmp_path / "stream.jsonl").read_bytes())
+    )
+    verify_stream(tmp_path)
+    result["provider"] = "Changed Provider"
+    (tmp_path / "response.json").write_text(json.dumps(result))
+    with pytest.raises(AssertionError, match="provider"):
+        verify_stream(tmp_path)
+
+
 @pytest.mark.parametrize("endpoint", ["http://127.0.0.1:8080/v1", "https://api.example.com/v1"])
 @pytest.mark.parametrize("key_env", [None, "MODEL_TEST_KEY"])
 def test_custom_model_run_resume_export_and_report(tmp_path, monkeypatch, key_env, endpoint):
@@ -145,14 +223,22 @@ def test_custom_model_run_resume_export_and_report(tmp_path, monkeypatch, key_en
     )
     research.run(args)
     args.resume = True
-    for _ in range(2):
-        (args.run / "002").mkdir()
-        (args.run / "002/request.json").write_text("{}")
-        research.run(args)
     args.experiments = 2
+
+    def interrupt(request, **kwargs):
+        raise KeyboardInterrupt
+
+    for _ in range(2):
+        with monkeypatch.context() as patch:
+            patch.setattr(inference.OPENER, "open", interrupt)
+            with pytest.raises(KeyboardInterrupt):
+                research.run(args)
+        assert not (args.run / "002/decision.json").exists()
     research.run(args)
-    interrupted = sorted(p.name for p in args.run.glob("002-*"))
-    assert interrupted == ["002-interrupted-1", "002-interrupted-2"]
+    assert not list(args.run.glob("002-interrupted-*"))
+    retries = list((args.run / "002/retries").glob("*/request.json"))
+    assert len(retries) == 2
+    assert all(p.read_bytes() == (args.run / "002/request.json").read_bytes() for p in retries)
     assert [request["model"] for request in requested] == ["test-model", "test-model"]
     assert all("top_k" not in request for request in requested)
     manifest = json.loads((args.run / "manifest.json").read_text())

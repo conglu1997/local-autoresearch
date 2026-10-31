@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 from report import report
+from runner.inference import CALL_FILES
 from runner.search import structural_hash
 
 ROOT_FILES = {
@@ -29,20 +30,19 @@ ROOT_FILES = {
     "final-test.json",
     "baseline-final-test.json",
 }
-ATTEMPT_FILES = {
+ATTEMPT_FILES = CALL_FILES | {
+    "agent.json",
+    "draft.py",
+    "submission.json",
+    "retry.json",
     "admission.json",
     "completed.json",
     "worker.log",
-    "request.json",
     "interrupted.json",
-    "response.json",
-    "response.txt",
     "solver.py",
     "evaluation.json",
     "decision.json",
-    "stream.jsonl",
     "diagnostic.json",
-    "http-error.txt",
 }
 
 
@@ -85,11 +85,18 @@ def redacted_stream(lines, key=None):
         rows.append((line, event, chunk, json.dumps(chunk)))
         if chunk is None or "error" in chunk:
             continue
-        for choice in chunk["choices"]:
+        for choice in chunk.get("choices", []):
             delta = choice["delta"]
             for name in ("content", "reasoning", "reasoning_content"):
                 if delta.get(name):
-                    fields.setdefault((choice["index"], name), []).append((delta, name))
+                    fields.setdefault((choice.get("index", 0), name), []).append((delta, name))
+            for tool in delta.get("tool_calls") or []:
+                function = tool.get("function") or {}
+                for name in ("name", "arguments"):
+                    if function.get(name):
+                        fields.setdefault((choice.get("index", 0), tool["index"], name), []).append(
+                            (function, name)
+                        )
     for fragments in fields.values():
         original = "".join(obj[name] for obj, name in fragments)
         reject_credentials(original, key, "stream.jsonl")

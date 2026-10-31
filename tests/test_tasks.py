@@ -92,7 +92,7 @@ def test_runner_records_single_trial_and_rejects_changed_evaluator(tmp_path, mon
     )
     baseline = Path(f"tasks/{task}/baseline.py").read_text()
     monkeypatch.setattr(
-        research,
+        inference,
         "complete",
         lambda *a: {"finish_reason": "stop", "content": f"```python\n{baseline}```"},
     )

@@ -11,17 +11,29 @@ def save(path, value):
     temporary.replace(path)
 
 
+def failure_info(result, default="evaluation_error"):
+    if result.get("valid"):
+        return {"failure_kind": None, "error_summary": None}
+    failure = next((trial for trial in result.get("trials", []) if not trial["valid"]), result)
+    return {
+        "failure_kind": failure.get("failure_kind", result.get("failure_kind", default)),
+        "error_summary": (failure.get("error") or result.get("error") or "Evaluation failed")[:500],
+    }
+
+
 def feedback(result):
     if "trials" not in result:
         return result
     return {
         "valid": result["valid"],
         "mean_score": result["mean_score"],
+        **failure_info(result),
         "trials": [
             {
                 key: value
                 for key, value in trial.items()
-                if key not in ("circles", "certificate", "solution", "correlations")
+                if key
+                not in ("circles", "certificate", "solution", "correlations", "failed_output")
             }
             for trial in result["trials"]
         ],
